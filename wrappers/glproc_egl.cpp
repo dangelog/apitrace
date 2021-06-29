@@ -58,6 +58,96 @@ void *_libGlHandle = NULL;
 #define RTLD_DEEPBIND 0
 #endif
 
+static bool
+addressBelongsToApitrace(void *address)
+{
+    Dl_info info;
+    if (dladdr(address, &info)) {
+        os::log("apitrace: addressBelongsToApitrace: '%p' belongs to '%s'\n", address, info.dli_fname);
+        if (strstr(info.dli_fname, "egltrace.so")) {
+            os::log("apitrace: addressBelongsToApitrace: '%p' belongs to apitrace\n", address);
+            return true;
+        } else {
+            os::log("apitrace: addressBelongsToApitrace: '%p' does NOT belong to apitrace\n", address);
+            return false;
+        }
+    } else {
+        os::log("apitrace: addressBelongsToApitrace: dladdr failed!\n");
+        return false;
+    }
+}
+
+void *
+_eglGetProcAddressWrapper(const char *procName)
+{
+    os::log("apitrace: _eglGetProcAddressWrapper for '%s'\n", procName);
+
+    if (!procName) {
+        return NULL;
+    }
+
+    // load libEGL and libGLESv2, just in case
+    static void *libEGL = NULL;
+    static void *libGLESv2 = NULL;
+    if (!libEGL) {
+        os::log("apitrace: _eglGetProcAddressWrapper: trying to load libEGL...\n");
+        libEGL = _dlopen("libEGL.so", RTLD_LOCAL | RTLD_LAZY | RTLD_DEEPBIND);
+        if (!libEGL) {
+            return NULL;
+        }
+        os::log("apitrace: _eglGetProcAddressWrapper: libEGL loaded\n");
+
+        os::log("apitrace: _eglGetProcAddressWrapper: trying to load libGLESv2...\n");
+        libGLESv2 = _dlopen("libGLESv2.so", RTLD_LOCAL | RTLD_LAZY | RTLD_DEEPBIND);
+        if (!libGLESv2) {
+            return NULL;
+        }
+        os::log("apitrace: _eglGetProcAddressWrapper: libGLESv2 loaded\n");
+    }
+
+    static void *(*eglGetProcAddress_the_real_one)(const char *) = NULL;
+    static bool eglGetProcAddress_the_real_one_resolved = false;
+    if (!eglGetProcAddress_the_real_one_resolved) {
+        os::log("apitrace: _eglGetProcAddressWrapper: trying to resolve the real eglGetProcAddress\n");
+        eglGetProcAddress_the_real_one_resolved = true;
+
+        void *eglGetProcAddress_resolved = dlsym(RTLD_NEXT, "eglGetProcAddress");
+
+        if (addressBelongsToApitrace(eglGetProcAddress_resolved)) {
+            os::log("apitrace: _eglGetProcAddressWrapper: dlsym returned the wrong eglGetProcAddress :-(\n");
+        } else {
+            eglGetProcAddress_the_real_one = reinterpret_cast<void *(*)(const char *)>(eglGetProcAddress_resolved);
+        }
+    }
+
+    void *proc = NULL;
+
+    // if it's there, try the real one first
+    if (eglGetProcAddress_the_real_one) {
+        os::log("apitrace: _eglGetProcAddressWrapper: trying the real eglGetProcAddress...\n");
+        proc = eglGetProcAddress_the_real_one(procName);
+        if (proc) {
+            if (addressBelongsToApitrace(proc)) {
+                os::log("apitrace: _eglGetProcAddressWrapper: the real eglGetProcAddress returned an address (%p) belonging to apitrace\n", proc);
+                proc = NULL;
+            } else {
+                os::log("apitrace: _eglGetProcAddressWrapper: the real eglGetProcAddress returned %p which seems OK\n", proc);
+            }
+        } else {
+            os::log("apitrace: _eglGetProcAddressWrapper: the real eglGetProcAddress returned NULL.\n");
+        }
+    }
+
+    if (!proc) {
+        os::log("apitrace: _eglGetProcAddressWrapper: trying dlsym directly.\n");
+        proc = dlsym(RTLD_NEXT, procName);
+    }
+
+    os::log("apitrace: _eglGetProcAddressWrapper: resolved '%s' to '%p'\n", procName, proc);
+
+    return proc;
+}
+
 /*
  * Lookup a public EGL/GL/GLES symbol
  *
@@ -71,6 +161,15 @@ _getPublicProcAddress(const char *procName)
 {
     void *proc;
 
+    os::log("apitrace: _getPublicProcAddress '%s'\n", procName);
+
+    if (getenv("OVERRIDE_EGLGETPROCADDRESS") != NULL
+            && strcmp(procName, "eglGetProcAddress") == 0)
+    {
+        os::log("apitrace: _getPublicProcAddress: returning built-in eglGetProcAddress wrapper\n");
+        return (void *)&_eglGetProcAddressWrapper;
+    }
+
     /*
      * We rely on dlsym(RTLD_NEXT, ...) whenever we can, because certain gl*
      * symbols are exported by multiple APIs/SOs, and it's not trivial to
@@ -78,6 +177,7 @@ _getPublicProcAddress(const char *procName)
      */
     proc = dlsym(RTLD_NEXT, procName);
     if (proc) {
+        (void)addressBelongsToApitrace(proc);
         return proc;
     }
 
@@ -98,7 +198,9 @@ _getPublicProcAddress(const char *procName)
                 return NULL;
             }
         }
-        return dlsym(libEGL, procName);
+        proc = dlsym(libEGL, procName);
+        (void)addressBelongsToApitrace(proc);
+        return proc;
     }
 
     /*
@@ -121,6 +223,7 @@ _getPublicProcAddress(const char *procName)
     if (strcmp(procName, "eglGetProcAddress") != 0) {
         proc = (void *) _eglGetProcAddress(procName);
         if (proc) {
+            (void)addressBelongsToApitrace(proc);
             return proc;
         }
     }
@@ -174,6 +277,8 @@ _getPublicProcAddress(const char *procName)
 void *
 _getPrivateProcAddress(const char *procName)
 {
+    os::log("apitrace: EGL _getPrivateProcAddress '%s'\n", procName);
+
     void *proc;
     proc = _getPublicProcAddress(procName);
     if (!proc &&

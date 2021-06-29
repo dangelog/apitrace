@@ -57,6 +57,8 @@ PRIVATE
 void *
 dlsym(void * handle, const char * symbol)
 {
+    os::log("apitrace: dlsym(\"%s\")\n", symbol);
+
     /*
      * We rely on glibc's internal __libc_dlsym.  See also
      * http://www.linuxforu.com/2011/08/lets-hook-a-library-function/
@@ -153,6 +155,8 @@ void * dlopen(const char *filename, int flag)
 {
     void *handle;
 
+    os::log("apitrace: dlopen(\"%s\", 0x%x)\n", filename, flag);
+
     if (!filename) {
         return _dlopen(filename, flag);
     }
@@ -221,6 +225,7 @@ void * dlopen(const char *filename, int flag)
         // (https://github.com/apitrace/apitrace/issues/291#issuecomment-59734022)
         if (strcmp(filename, "libEGL.so") != 0 &&
             strcmp(filename, "libEGL.so.1") != 0) {
+            os::log("apitrace: forcing load of libEGL.so.1\n");
             _dlopen("libEGL.so.1", RTLD_GLOBAL | RTLD_LAZY);
         }
 #endif
